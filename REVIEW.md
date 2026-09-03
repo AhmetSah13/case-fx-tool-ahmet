@@ -52,8 +52,7 @@ döndürüyor (71–81. satırlar).
 
 Bu normal bir return olduğu için FastAPI HTTP 200 döndürüyor.
 
-Upstream status code da kontrol edilmediği için timeout, bağlantı problemi,
-HTTP 500 veya bozuk bir response gibi durumlar bu noktaya düşebilir.
+Upstream status code da ayrıca kontrol edilmiyor. Timeout, bağlantı problemi, HTTP 500 veya bozuk bir response gibi farklı hata durumlarının tamamı geniş except bloğu nedeniyle aynı şekilde başarılı görünen 0 değerli bir cevaba dönüşebiliyor.
 
 **Müşteriye etkisi**
 
