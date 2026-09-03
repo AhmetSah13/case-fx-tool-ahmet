@@ -1,91 +1,155 @@
-# Production review
+# Production İncelemesi
 
-## Findings
+## Bulgular
 
-### 1. Historical rates can be wrong and assigned to the wrong date
+### 1. Farklı tarihler için yanlış kur kullanılabilir
 
-**What is wrong:** The cache key contains only the currency pair, not the
-requested date (lines 28–30). A rate fetched for one date is therefore reused
-for every other date and relabeled with the new request's date. Outside the
-cache, the function never reads the upstream payload's `date`; it always returns
-the requested date or today (line 44). If a response lacks the target rate, it
-also falls back to `/latest` (lines 36–40), even for a historical request.
+**Problem nedir?**
 
-**Customer impact:** An agent can quote the latest available rate for an old transaction, or
-reuse one historical rate for another day, while confidently claiming that the
-rate belongs to the requested date. This creates incorrect financial data with
-misleading provenance, which is more dangerous than returning no result.
+Cache key içinde sadece para birimleri var, tarih yok (28–30. satırlar).
+Bu yüzden bir tarih için alınan kur, aynı para birimleriyle başka bir tarih
+sorulduğunda tekrar kullanılabilir.
 
-**How I would verify it:** Configure a fake upstream with different rates for
-two dates, request both dates for the same pair, and assert that two upstream
-calls occur and each response reports the payload's actual date. Separately,
-return a Friday payload for a weekend request and confirm that Friday—not the
-requested Sunday—is reported as the rate date.
+Ayrıca kod upstream'den gelen gerçek `date` bilgisini kullanmıyor. Kur hangi
+tarihe ait olursa olsun istenen tarihle birlikte dönüyor (44. satır).
 
-### 2. Upstream failures become apparently successful zero conversions
+İstenen kur bulunamazsa geçmiş tarihli bir sorguda bile `/latest` endpoint'ine
+fallback yapılması da aynı problemi büyütüyor (36–40. satırlar).
 
-**What is wrong:** The broad exception handler catches every failure and returns
-a normal dictionary containing `rate: 0.0` and `result: 0.0` (lines 71–81).
-FastAPI consequently sends HTTP 200. The upstream status is not checked before
-JSON parsing, so timeouts, connection failures, error responses, non-JSON
-bodies, and malformed payloads can all end in this false-success path.
+**Müşteriye etkisi**
 
-**Customer impact:** A customer or agent cannot distinguish a real zero-valued
-conversion from a provider outage or software error. It may present or persist
-zero as a valid financial result instead of stopping and asking the customer to
-retry.
+Bir kullanıcı geçmiş tarihli bir fatura veya ödeme için kur sorduğunda sistem
+başka bir günün kurunu döndürebilir. Daha önemlisi, bu kurun yanlış tarihe ait
+olduğu response'tan anlaşılmayabilir.
 
-**How I would verify it:** Make the fake client raise a timeout, then return an
-HTTP 500, non-JSON text, and JSON without the requested rate. Each case should
-produce a non-2xx status and a structured error; the current implementation
-returns HTTP 200 with zeros.
+Bunu en kritik hata olarak görüyorum. Çünkü sistem hata vermek yerine normal
+görünen bir HTTP 200 cevabı ile yanlış finansal bilgi verebilir.
 
-### 3. The required public and runtime contracts are not honored
+**Nasıl test ederdim?**
 
-**What is wrong:** The upstream URL is hardcoded (line 18), so
-`FX_UPSTREAM_BASE` is ignored. The route exposes `from_` and `on` (lines 48–49),
-whereas callers are required to send `from` and `date`. Those required names can
-be ignored as extra query parameters while the defaults select EUR and the
-latest rate. Successful responses also omit `asked_date` (lines 62–70).
+Fake upstream üzerinde aynı para birimleri için iki farklı tarihe iki farklı kur
+tanımlardım. İki tarihi sırayla sorgulayıp doğru kurların ve upstream'in gerçek
+tarihlerinin döndüğünü kontrol ederdim.
 
-**Customer impact:** A correctly formed request can be calculated using the
-wrong source currency and wrong date. Operators also cannot redirect traffic to
-a controlled upstream during testing or an incident, and callers lack the field
-needed to explain a weekend rate to a customer.
+Hafta sonu için de cuma gününe ait kur döndüren bir senaryo hazırlayıp
+`rate_date` değerinin cuma olduğunu doğrulardım.
 
-**How I would verify it:** Inspect the generated OpenAPI query names, then send
-`from=USD&date=2024-01-10` to a fake upstream configured through the environment.
-Record which host, base, and path are actually requested and inspect whether the
-response includes `asked_date`.
+---
 
-### 4. Rounding and input handling can produce unsafe monetary results
+### 2. Upstream hataları başarılı bir sonuç gibi dönüyor
 
-**What is wrong:** The endpoint parses `amount` as a binary float and rounds the
-rate to two decimals before multiplication (lines 48 and 60–61). It imposes no
-policy for zero, negative, non-finite, or excessively precise amounts, and does
-not reject identical currencies before contacting the upstream.
+**Problem nedir?**
 
-**Customer impact:** Premature rate rounding can materially change a conversion,
-especially for large amounts, while invalid inputs can be accepted or collapse
-into the false-success behavior above. The output may look precise to two
-decimal places despite being calculated from a degraded rate.
+Kodun sonundaki geniş `except` bloğu hataları yakalayıp:
 
-**How I would verify it:** Return a rate of `1.2349` and convert `1000`; the code
-uses `1.23` and returns `1230.00` rather than `1234.90`. Also exercise zero,
-negative, NaN, Infinity, high-precision, and same-currency requests and require
-explicit, documented outcomes.
+`rate: 0.0`
 
-## Fix before shipping
+ve
 
-I would first fix the historical rate provenance and cache behavior in finding
-1. It can silently provide both the wrong rate and a false date under an HTTP
-200 response, leaving the customer no signal that the answer is unsafe. The fix
-must key rates by currency pair and requested date, cache the actual upstream
-date with the rate, and never replace a historical lookup with `/latest`.
+`result: 0.0`
 
-## Suspicious but acceptable
+döndürüyor (71–81. satırlar).
 
-Using a process-local dictionary as the cache (lines 20–21) is reasonable for a
-small, single-process service and does not require Redis or a database. The
-production defect is the information used in its key and value, not the choice
-of an in-memory mechanism itself.
+Bu normal bir return olduğu için FastAPI HTTP 200 döndürüyor.
+
+Upstream status code da kontrol edilmediği için timeout, bağlantı problemi,
+HTTP 500 veya bozuk bir response gibi durumlar bu noktaya düşebilir.
+
+**Müşteriye etkisi**
+
+Servis aslında kuru alamamış olsa bile çağıran sistem bunu başarılı bir işlem
+olarak görebilir.
+
+Örneğin bir AI agent kullanıcıya "şu anda kuru alamıyorum" demek yerine
+`0` değerini gerçek bir sonuç gibi gösterebilir.
+
+**Nasıl test ederdim?**
+
+Fake upstream ile timeout, HTTP 500, non-JSON response ve eksik rate alanı
+senaryolarını test ederdim.
+
+Bu durumlarda HTTP 200 yerine kontrollü bir hata ve non-2xx status beklerdim.
+
+---
+
+### 3. Case'te istenen API contract tam uygulanmamış
+
+**Problem nedir?**
+
+Upstream adresi kodun içine yazılmış (18. satır). Bu yüzden
+`FX_UPSTREAM_BASE` değişkeni kullanılmıyor.
+
+Endpoint tarafında da beklenen query parametreleri `from` ve `date` iken
+kodda `from_` ve `on` kullanılıyor (48–49. satırlar).
+
+Success response içinde `asked_date` alanı da yok.
+
+**Müşteriye etkisi**
+
+Doğru görünümlü bir request gönderilmesine rağmen kod farklı default değerlerle
+çalışabilir. Bu da yanlış para birimi veya yanlış tarihle hesap yapılmasına
+neden olabilir.
+
+`FX_UPSTREAM_BASE` kullanılmadığı için test sırasında servisi fake upstream'e
+yönlendirmek de mümkün olmaz.
+
+**Nasıl test ederdim?**
+
+Önce OpenAPI üzerinden gerçek query parametrelerini kontrol ederdim.
+
+Daha sonra `FX_UPSTREAM_BASE` ile fake bir upstream tanımlayıp
+`from=USD&date=2024-01-10` isteği gönderirdim. Kodun gerçekten hangi host,
+para birimi ve tarih ile upstream'e gittiğini kontrol ederdim.
+
+---
+
+### 4. Kur hesaplanmadan önce yuvarlanıyor
+
+**Problem nedir?**
+
+`amount` değeri `float` olarak alınıyor ve upstream'den gelen kur çarpma
+işleminden önce iki ondalık basamağa yuvarlanıyor (48 ve 60–61. satırlar).
+
+Örneğin kur `1.2349`, amount `1000` ise doğru sonuç `1234.90` olmalı.
+
+Mevcut kod önce kuru `1.23` yaptığı için sonuç `1230.00` oluyor.
+
+Ayrıca zero, negative, NaN, Infinity ve same-currency gibi input'lar için
+açık bir davranış tanımlanmamış.
+
+**Müşteriye etkisi**
+
+Özellikle büyük miktarlarda erken yuvarlama sonucu değiştirebilir. Response
+normal bir finansal sonuç gibi göründüğü için kullanıcı bu hatayı kolayca fark
+edemez.
+
+**Nasıl test ederdim?**
+
+Fake upstream'den `1.2349` kur döndürüp `1000` amount ile sonucu kontrol
+ederdim. Ayrıca zero, negative, NaN, Infinity ve same-currency isteklerini ayrı
+ayrı denerdim.
+
+## Production'a çıkmadan önce ilk neyi düzeltirdim?
+
+İlk olarak 1. problemi düzeltirdim.
+
+Cache key'e tarihi ekler, rate ile birlikte upstream'in gerçek tarihini de
+saklardım. Geçmiş tarihli bir sorguda `/latest` fallback kullanılmasını da
+kaldırırdım.
+
+Bunu ilk sıraya koymamın nedeni, mevcut kodun müşteriye hem yanlış kur hem de
+yanlış tarih verebilmesi ve bunu normal bir HTTP 200 cevabı içinde yapması.
+
+Daha sonra upstream hatalarının `0` değerli başarılı response'lara dönüşmesini
+düzeltirdim.
+
+## İlk bakışta sorun gibi görünen ama kabul edilebilir bir nokta
+
+Process-local dictionary kullanılması tek başına problem değil.
+
+Küçük ve tek process çalışan bir servis için memory cache yeterli olabilir.
+Buradaki asıl hata Redis kullanılmaması değil; cache key içinde tarihin
+olmaması ve gerçek `rate_date` bilgisinin saklanmaması.
+
+Bu yüzden cache sistemini tamamen değiştirmek yerine önce cache'lenen bilginin
+doğruluğunu düzeltirdim.

@@ -5,10 +5,13 @@ rates provided by Frankfurter.
 
 ## Setup
 
-Python 3.10 or newer is recommended.
+Python 3.10 or newer is recommended. Depending on the system, Python 3 may be
+available as either `python` or `python3`.
 
 ```sh
 python -m venv .venv
+# or: python3 -m venv .venv
+
 # Activate .venv using the standard command for your shell.
 python -m pip install -r requirements.txt
 ```
