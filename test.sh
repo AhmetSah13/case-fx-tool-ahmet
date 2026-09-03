@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Runs your tests. They must pass with no network at all: we run this with
-# FX_UPSTREAM_BASE pointing at a closed port.
+# Runs the complete offline test suite.
 set -euo pipefail
-echo "test.sh is not implemented yet" >&2
-exit 1
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+exec python -m pytest -q
